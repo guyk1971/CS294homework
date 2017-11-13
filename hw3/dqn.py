@@ -7,6 +7,8 @@ import tensorflow                as tf
 import tensorflow.contrib.layers as layers
 from collections import namedtuple
 from dqn_utils import *
+import os
+import pickle
 
 OptimizerSpec = namedtuple("OptimizerSpec", ["constructor", "kwargs", "lr_schedule"])
 
@@ -14,6 +16,7 @@ def learn(env,
           q_func,
           optimizer_spec,
           session,
+          checkpoint_dir,
           exploration=LinearSchedule(1000000, 0.1),
           stopping_criterion=None,
           replay_buffer_size=1000000,
@@ -126,9 +129,20 @@ def learn(env,
     # q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='q_func')
     # Older versions of TensorFlow may require using "VARIABLES" instead of "GLOBAL_VARIABLES"
     ######
-    
     # YOUR CODE HERE
+    q_s_all = q_func(obs_t_float,num_actions,scope="qs",reuse=False)       # q_s_all is of size [N,num_actions] and includes Q(s,*)
+    act_t = tf.argmax(q_s_all,axis=1)    # this will be used when sampling from the policy (later in the code)
+    # now we need to extract Q(s_t,a_t) from it:
+    a_t_one_hot = tf.one_hot(act_t_ph,depth=num_actions)
+    q_sa = tf.reduce_sum(q_s_all*a_t_one_hot,axis=1)
+    # now calculate the target q : based on obs_tp1
+    target_q_vals_tp1 = q_func(obs_tp1_float,num_actions,scope="target_qs",reuse=False)     # the target network is fed by obs_tp1
+    # if done = 1 then the target is composed only from the reward. not from the Q of the next state (as there's no next state)
 
+    target_y = rew_t_ph + gamma * (1.0-done_mask_ph) * tf.reduce_max(target_q_vals_tp1,axis=1)
+    total_error = tf.nn.l2_loss(q_sa-target_y)
+    q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,scope="qs")
+    target_q_func_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,scope="target_qs")
     ######
 
     # construct optimization op (with gradient clipping)
@@ -156,6 +170,14 @@ def learn(env,
     best_mean_episode_reward = -float('inf')
     last_obs = env.reset()
     LOG_EVERY_N_STEPS = 10000
+
+    metrics_filename = os.path.join(checkpoint_dir, "metrics.pkl")
+    metrics = {
+        "timestep": [],
+        "mean_reward": [],
+        "best_mean_reward": [],
+        "error": [],
+    }
 
     for t in itertools.count():
         ### 1. Check stopping criterion
@@ -195,7 +217,27 @@ def learn(env,
         #####
         
         # YOUR CODE HERE
+        rb_idx=replay_buffer.store_frame(last_obs)
+        epsilon = exploration.value(t)
+        if model_initialized:
+            # if the model is initialized, take the action from the model.
+            obs_w_context = replay_buffer.encode_recent_observation()   # create observation for the model
+            best_act = session.run(act_t,feed_dict={obs_t_ph:obs_w_context[None]})[0]   # sample from the policy : argmax_a Q(s,a)
+            # implement epsilon greedy policy :
+            act_prob = np.ones(num_actions,dtype=float) * epsilon / (num_actions-1)    # initialize the probabilities of all actions to be epsilon/num_actions
+            act_prob[best_act] = (1.0-epsilon)
+            action = np.random.choice(np.arange(len(act_prob)), p=act_prob)   # sample action
+        else:   # if the model is not initialized, sample a random action
+            # action = env.action_space.sample()
+            action = random.randint(0, num_actions - 1)
 
+        last_obs, reward, done, info = env.step(action)
+        # push to the replay buffer
+        
+        replay_buffer.store_effect(rb_idx,action,reward,done)
+
+        if done:
+            last_obs = env.reset()
         #####
 
         # at this point, the environment should have been advanced one step (and
@@ -244,8 +286,25 @@ def learn(env,
             # variable num_param_updates useful for this (it was initialized to 0)
             #####
             
-            # YOUR CODE HERE
+            # YOUR CODE HERE:
+            # step 3a : sample a batch of transitions
+            obs_t_batch, act_t_batch, rew_t_batch, obs_tp1_batch, done_mask_batch = replay_buffer.sample(batch_size=batch_size)
+            # step 3b : initialize model if needed
+            if not model_initialized:
+                initialize_interdependent_variables(session,tf.global_variables(),{
+                    obs_t_ph: obs_t_batch,
+                    obs_tp1_ph:obs_tp1_batch
+                })
+                model_initialized = True
+            # step 3c: train the model
+            _,err=session.run([train_fn,total_error],feed_dict={obs_t_ph:obs_t_batch,act_t_ph:act_t_batch,rew_t_ph:rew_t_batch,
+                                            obs_tp1_ph:obs_tp1_batch,done_mask_ph:done_mask_batch,
+                                            learning_rate:optimizer_spec.lr_schedule.value(t)})
 
+            # step 3d: periodically update the target network
+            num_param_updates += 1
+            if num_param_updates % target_update_freq == 0 :    # time has come to update the target network
+                session.run(update_target_fn)
             #####
 
         ### 4. Log progress
@@ -255,6 +314,17 @@ def learn(env,
         if len(episode_rewards) > 100:
             best_mean_episode_reward = max(best_mean_episode_reward, mean_episode_reward)
         if t % LOG_EVERY_N_STEPS == 0 and model_initialized:
+
+
+
+
+            metrics["timestep"].append(t)
+            metrics["mean_reward"].append(mean_episode_reward)
+            metrics["best_mean_reward"].append(best_mean_episode_reward)
+            metrics["error"].append(err)
+            with open(metrics_filename, "wb") as f:
+                pickle.dump(metrics, f)
+
             print("Timestep %d" % (t,))
             print("mean reward (100 episodes) %f" % mean_episode_reward)
             print("best mean reward %f" % best_mean_episode_reward)
@@ -262,3 +332,4 @@ def learn(env,
             print("exploration %f" % exploration.value(t))
             print("learning_rate %f" % optimizer_spec.lr_schedule.value(t))
             sys.stdout.flush()
+

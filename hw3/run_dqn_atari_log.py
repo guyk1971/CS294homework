@@ -2,12 +2,14 @@ import argparse
 import gym
 from gym import wrappers
 import os.path as osp
+import os
+import time
 import random
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
-
-import dqn
+from multiprocessing import Process
+import dqn_log as dqn
 from dqn_utils import *
 from atari_wrappers import *
 
@@ -28,14 +30,19 @@ def atari_model(img_in, num_actions, scope, reuse=False):
 
         return out
 
-def atari_learn(env,
-                session,
+def atari_learn(exp_name,
+                task,
+                seed,
+                logdir,
                 checkpoint_dir,
                 num_timesteps,
                 target_update_freq):
+
+    # get environment
+    env = get_env(task, seed)
+    session = get_session()
     # This is just a rough estimate
     num_iterations = float(num_timesteps) / 4.0
-
     lr_multiplier = 1.0
     lr_schedule = PiecewiseSchedule([
                                          (0,                   1e-4 * lr_multiplier),
@@ -63,10 +70,12 @@ def atari_learn(env,
     )
 
     dqn.learn(
+        exp_name,
         env,
         q_func=atari_model,
         optimizer_spec=optimizer,
         session=session,
+        logdir = logdir,
         checkpoint_dir = checkpoint_dir,
         exploration=exploration_schedule,
         stopping_criterion=stopping_criterion,
@@ -120,22 +129,49 @@ def get_env(task, seed):
     return env
 
 def main(args):
+
     # Get Atari games.
     benchmark = gym.benchmark_spec('Atari40M')
-
     # Change the index to select a different game.
     task = benchmark.tasks[3]
+    env_name = task.env_id
 
-    # Run training
-    seed = 0 # Use a seed of zero (you may want to randomize the seed!)
-    env = get_env(task, seed)
-    session = get_session()
-    num_timesteps = args.num_timesteps or task.max_timesteps
+    # create the logs directory
+    if not(os.path.exists('data')):
+        os.makedirs('data')
+    logdir = args.exp_name + '_' + env_name + '_' + time.strftime("%d-%m-%Y_%H-%M-%S")
+    logdir = os.path.join('data', logdir)
+    if not(os.path.exists(logdir)):
+        os.makedirs(logdir)
 
-    atari_learn(env, session, checkpoint_dir=args.checkpoint_dir ,num_timesteps=num_timesteps,target_update_freq=args.target_update_freq)
+    for e in range(args.n_experiments):
+        seed = args.seed + 10*e
+        print('Running experiment with seed %d'%seed)
+        # Run training
+        num_timesteps = args.num_timesteps or task.max_timesteps
+        def train_func():
+            atari_learn(args.exp_name,
+                        task,
+                        seed, 
+                        logdir=os.path.join(logdir,'%d'%seed),
+                        checkpoint_dir=args.checkpoint_dir ,
+                        num_timesteps=num_timesteps,
+                        target_update_freq=args.target_update_freq)
+
+        p = Process(target=train_func, args=tuple())
+        p.start()
+        p.join()
+
+
 
 def get_arg_parser():
     parser = argparse.ArgumentParser()
+
+    parser.add_argument('--exp_name', type=str, default='vpg')
+    parser.add_argument('--seed', type=int, default=1)
+    parser.add_argument('--n_experiments', '-e', type=int, default=1)
+
+
     parser.add_argument(
         "--target_update_freq",
         type=int,
@@ -148,18 +184,19 @@ def get_arg_parser():
 	    default=16000000,
         help="Maximum number of timesteps to run",
     )
-    # parser.add_argument(
-    #     "--replay_buffer_size",
-    #     type=int,
-    #     default=1000000,
-    #     help="Size of the replay buffer",
-    # )
+    parser.add_argument(
+        "--replay_buffer_size",
+        type=int,
+        default=1000000,
+        help="Size of the replay buffer",
+    )
     parser.add_argument(
         "--checkpoint_dir",
         type=str,
         default='./checkpoints',
         help="Directory to checkpoint NN",
     )
+
     return parser
 
 

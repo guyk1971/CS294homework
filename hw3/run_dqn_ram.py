@@ -52,7 +52,7 @@ def atari_learn(env,
         [
             (0, 0.2),
             (1e6, 0.1),
-            (num_iterations / 2, 0.01),
+            (10e6 / 2, 0.01),
         ], outside_value=0.01
     )
 
