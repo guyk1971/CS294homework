@@ -11,21 +11,51 @@ import copy
 import matplotlib.pyplot as plt
 from cheetah_env import HalfCheetahEnvNew
 
-def sample(env, 
-           controller, 
-           num_paths=10, 
-           horizon=1000, 
+def paths_to_data(paths):
+    data['observations'] = np.concatenate(paths['observations'])     # shape [num_paths*path_length,obs_dim]
+    data['actions'] = np.concatenate(paths['actions'])             # shape [num_paths*path_length,act_dim]
+    data['next_observations'] = np.concatenate(paths['next_observations'])     # shape [num_paths*path_length,obs_dim]
+    data['rewards'] = np.concatenate(paths['rewards'])  # shape [num_paths*path_length,1]
+    # note that path_length differs from path to path and always path_length<=horizon
+    return data
+
+
+
+def sample(env,
+           controller,
+           num_paths=10,
+           horizon=1000,
            render=False,
            verbose=False):
     """
-        Write a sampler function which takes in an environment, a controller (either random or the MPC controller), 
-        and returns rollouts by running on the env. 
+        Write a sampler function which takes in an environment, a controller (either random or the MPC controller),
+        and returns rollouts by running on the env.
         Each path can have elements for observations, next_observations, rewards, returns, actions, etc.
     """
-    paths = []
-    """ YOUR CODE HERE """
-
+    path_cnt = 0 # counts how many paths we have collected
+    paths = {'observations':[],'actions':[],'next_observations':[],'rewards':[]}
+    while path_cnt<num_paths:
+        path_obs,path_acs,path_rewards,path_next_obs = [],[],[],[]
+        ob = env.reset()
+        steps = 0   # count the number of steps in the path
+        while True:
+            ac = controller.get_action(ob)  # sample an action from the contoller
+            next_ob,reward,done,_=env.step(ac)   # progress one step with the environment
+            path_obs.append(ob)
+            path_acs.append(ac)
+            path_rewards.append(reward)
+            path_next_obs.append(next_ob)
+            ob = next_ob
+            steps += 1
+            if done or steps > horizon:
+                break
+        paths['observations'].append(path_obs)
+        paths['actions'].append(path_acs)
+        paths['next_observations'].append(path_next_obs)
+        paths['rewards'].append(path_rewards)
+        path_cnt+=1
     return paths
+
 
 # Utility to compute cost a path for a given cost function
 def path_cost(cost_fn, path):
@@ -35,9 +65,21 @@ def compute_normalization(data):
     """
     Write a function to take in a dataset and compute the means, and stds.
     Return 6 elements: mean of s_t, std of s_t, mean of (s_t+1 - s_t), std of (s_t+1 - s_t), mean of actions, std of actions
+
     """
 
     """ YOUR CODE HERE """
+    s_t = data['observations']
+    a_t = data['actions']
+    delta = data['next_observations'] - data['observations']
+
+
+    mean_obs = np.mean(s_t,axis=0)
+    std_obs = np.std(s_t,axis=0)
+    mean_deltas = np.mean(delta,axis=0)
+    std_deltas = np.std(delta,axis=0)
+    mean_action = np.mean(a_t,axis=0)
+    std_action = np.std(a_t,axis=0)
     return mean_obs, std_obs, mean_deltas, std_deltas, mean_action, std_action
 
 
@@ -109,9 +151,15 @@ def train(env,
     # agent, with which we'll begin to train our dynamics
     # model.
 
-    random_controller = RandomController(env)
-
     """ YOUR CODE HERE """
+    random_controller = RandomController(env)
+    paths = sample(env,random_controller,num_paths_random)
+    # paths should be dictionary with the following keys:
+    # 'observations'
+    # 'actions'
+    # 'next_observations'
+    # 'rewards'
+
 
 
     #========================================================
@@ -121,8 +169,10 @@ def train(env,
     # (where deltas are o_{t+1} - o_t). These will be used
     # for normalizing inputs and denormalizing outputs
     # from the dynamics network. 
-    # 
-    normalization = """ YOUR CODE HERE """
+    #
+    data=paths_to_data(paths)
+    normalization = compute_normalization(data)
+
 
 
     #========================================================
@@ -163,7 +213,29 @@ def train(env,
     # 
     for itr in range(onpol_iters):
         """ YOUR CODE HERE """
+        # shuffle the buffer
+        indxs=np.random.permutation(data['observations'].shape[0])
+        data['observations'] = data['observations'][indxs]
+        data['actions'] = data['actions'][indxs]
+        data['next_observations'] = data['next_observations'][indxs]
+        data['rewards'] = data['rewards'][indxs]
 
+
+        # fit dynamics model
+        dyn_model.fit(data)
+        # sample a set of on-policy trajectories using policy derived from mpc controller
+        new_paths = sample(env,mpc_controller,num_paths_onpol,env_horizon,render)
+
+        # compute performance metrics
+        costs = np.array([path_cost(cost_fn,path) for path in new_paths])
+        returns = np.array([sum(path['rewards']) for path in new_paths])
+
+        new_data = paths_to_data(new_paths)
+        # aggregate the data
+        data['observations'] = np.concatenate(data['observations'],new_data['observations'])
+        data['actions'] = np.concatenate(data['actions'], new_data['actions'])
+        data['next_observations'] = np.concatenate(data['next_observations'], new_data['next_observations'])
+        data['rewards'] = np.concatenate(data['next_observations'], new_data['next_observations'])
 
 
         # LOGGING
