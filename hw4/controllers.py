@@ -1,6 +1,13 @@
 import numpy as np
 from cost_functions import trajectory_cost_fn
 import time
+import logging
+
+def dd(s):
+    logging.getLogger("hw4").debug(s)
+
+def di(s):
+    logging.getLogger("hw4").info(s)
 
 
 class Controller():
@@ -52,12 +59,12 @@ class MPCcontroller(Controller):
         for i in range(self.horizon):
             # sample an action per each path
             curr_action = []
-            for _ in self.num_simulated_paths:
+            for _ in range(self.num_simulated_paths):
                 curr_action.append(self.env.action_space.sample())  # curr action per each path
             curr_action = np.concatenate([curr_action])  # shape : [num_simulated_paths,act_dim]
             next_state = self.dyn_model.predict(curr_state, curr_action)  # shape: [num_simulated_paths,obs_dim]
             # append it to the path data structure
-            states.append(states)
+            states.append(curr_state)
             actions.append(curr_action)
             next_states.append(next_state)
 

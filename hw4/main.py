@@ -7,11 +7,22 @@ from cost_functions import cheetah_cost_fn, trajectory_cost_fn
 import time
 import logz
 import os
+import logging
 import copy
 import matplotlib.pyplot as plt
 from cheetah_env import HalfCheetahEnvNew
 
+def dd(s):
+    logging.getLogger("hw4").debug(s)
+
+def di(s):
+    logging.getLogger("hw4").info(s)
+
+
+
+
 def paths_to_data(paths):
+    data=dict()
     data['observations'] = np.concatenate(paths['observations'])     # shape [num_paths*path_length,obs_dim]
     data['actions'] = np.concatenate(paths['actions'])             # shape [num_paths*path_length,act_dim]
     data['next_observations'] = np.concatenate(paths['next_observations'])     # shape [num_paths*path_length,obs_dim]
@@ -34,10 +45,12 @@ def sample(env,
     """
     path_cnt = 0 # counts how many paths we have collected
     paths = {'observations':[],'actions':[],'next_observations':[],'rewards':[]}
+    dd("sampling {0} trajectories".format(num_paths))
     while path_cnt<num_paths:
         path_obs,path_acs,path_rewards,path_next_obs = [],[],[],[]
         ob = env.reset()
         steps = 0   # count the number of steps in the path
+
         while True:
             ac = controller.get_action(ob)  # sample an action from the contoller
             next_ob,reward,done,_=env.step(ac)   # progress one step with the environment
@@ -49,11 +62,13 @@ def sample(env,
             steps += 1
             if done or steps > horizon:
                 break
+        dd("path {0} completed with {1} steps".format(path_cnt,steps))
         paths['observations'].append(path_obs)
         paths['actions'].append(path_acs)
         paths['next_observations'].append(path_next_obs)
         paths['rewards'].append(path_rewards)
         path_cnt+=1
+    dd("finished sampling")
     return paths
 
 
@@ -152,13 +167,14 @@ def train(env,
     # model.
 
     """ YOUR CODE HERE """
-    random_controller = RandomController(env)
+    random_controller = RandomController(env)       # randomly (unifotm) samples from the action space
     paths = sample(env,random_controller,num_paths_random)
     # paths should be dictionary with the following keys:
-    # 'observations'
-    # 'actions'
-    # 'next_observations'
-    # 'rewards'
+    # 'observations' : a list of 'path_observations' (which is by itself a list of observations of a path )
+    # 'actions': a list of 'path_actions' (which is by itself a list of actions of a path )
+    # 'next_observations': a list of 'path_next_observations' (which is by itself a list of observations of a path )
+    # 'rewards': a list of 'path_rewards' (which is by itself a list of the rewards along the path)
+
 
 
 
@@ -170,7 +186,7 @@ def train(env,
     # for normalizing inputs and denormalizing outputs
     # from the dynamics network. 
     #
-    data=paths_to_data(paths)
+    data=paths_to_data(paths)   # make paths a dictionary with the above keys, concatenating all paths to one long list per each key
     normalization = compute_normalization(data)
 
 
@@ -188,7 +204,7 @@ def train(env,
                                 output_activation=output_activation, 
                                 normalization=normalization,
                                 batch_size=batch_size,
-                                iterations=dynamics_iters,
+                                iterations=dynamics_iters,  # number of epochs
                                 learning_rate=learning_rate,
                                 sess=sess)
 
@@ -210,34 +226,43 @@ def train(env,
     # 
     # Take multiple iterations of onpolicy aggregation at each iteration refitting the dynamics model to current dataset and then taking onpolicy samples and aggregating to the dataset. 
     # Note: You don't need to use a mixing ratio in this assignment for new and old data as described in https://arxiv.org/abs/1708.02596
-    # 
+    #
+    dd("Starting iterations in main loop:")
     for itr in range(onpol_iters):
         """ YOUR CODE HERE """
         # shuffle the buffer
+        dd("iter {0} - shuffling data".format(itr))
         indxs=np.random.permutation(data['observations'].shape[0])
         data['observations'] = data['observations'][indxs]
         data['actions'] = data['actions'][indxs]
         data['next_observations'] = data['next_observations'][indxs]
         data['rewards'] = data['rewards'][indxs]
 
-
+        dd("fit dynamic model")
         # fit dynamics model
         dyn_model.fit(data)
+
+        dd("sample on policy trajectories")
         # sample a set of on-policy trajectories using policy derived from mpc controller
         new_paths = sample(env,mpc_controller,num_paths_onpol,env_horizon,render)
 
         # compute performance metrics
-        costs = np.array([path_cost(cost_fn,path) for path in new_paths])
-        returns = np.array([sum(path['rewards']) for path in new_paths])
+        costs = np.array([trajectory_cost_fn(cost_fn, new_paths['observations'][i], new_paths['actions'][i],
+                                     new_paths['next_observations'][i]) for i in range(len(new_paths['observations']))])
+        returns = np.array([sum(new_paths['rewards'][i]) for i in range(len(new_paths['rewards']))])
+        # costs = np.array([path_cost(cost_fn,path) for path in new_paths])
+        # returns = np.array([sum(path['rewards']) for path in new_paths])
 
+        dd("aggregate the data")
         new_data = paths_to_data(new_paths)
         # aggregate the data
-        data['observations'] = np.concatenate(data['observations'],new_data['observations'])
-        data['actions'] = np.concatenate(data['actions'], new_data['actions'])
-        data['next_observations'] = np.concatenate(data['next_observations'], new_data['next_observations'])
-        data['rewards'] = np.concatenate(data['next_observations'], new_data['next_observations'])
+        data['observations'] = np.concatenate((data['observations'],new_data['observations']))
+        data['actions'] = np.concatenate((data['actions'], new_data['actions']))
+        data['next_observations'] = np.concatenate((data['next_observations'], new_data['next_observations']))
+        data['rewards'] = np.concatenate((data['next_observations'], new_data['next_observations']))
 
-
+        dd("Logging:")
+        dd("Average Cost {0}, std cost {1}, AvgReturn {2}, std Return {3}".format(np.mean(costs),np.std(costs),np.mean(returns),np.std(returns)))
         # LOGGING
         # Statistics for performance of MPC policy using
         # our learned dynamics model
@@ -279,7 +304,21 @@ def main():
     parser.add_argument('--size', '-s', type=int, default=500)
     # MPC Controller
     parser.add_argument('--mpc_horizon', '-m', type=int, default=15)
+    # Misc
+    parser.add_argument('--verbose', '-v', action="store_true")
     args = parser.parse_args()
+
+    # Establish the logger.
+    format = "[%(asctime)-15s %(pathname)s:%(lineno)-3s] %(message)s"
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(format))
+    logger = logging.getLogger("hw4")
+    logger.propagate = False
+    logger.addHandler(handler)
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+
+
 
     # Set seed
     np.random.seed(args.seed)

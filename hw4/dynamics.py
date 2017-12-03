@@ -1,6 +1,12 @@
+import logging
 import tensorflow as tf
 import numpy as np
 
+def dd(s):
+    logging.getLogger("hw4").debug(s)
+
+def di(s):
+    logging.getLogger("hw4").info(s)
 
 
 # Predefined function to build a feedforward neural network
@@ -52,28 +58,33 @@ class NNDynamicsModel():
         eps=1e-9
         mean_obs, std_obs, mean_deltas, std_deltas, mean_action, std_action = self.normalization
         # todo: should I do the following lines with numpy or with tensorflow ops ?
-        norm_obs = tf.div(tf.subtract(self.obs_ph,mean_obs),tf.add(std_obs,eps))
-        norm_act = tf.div(tf.subtract(self.act_ph, mean_action), tf.add(std_action, eps))
+        # norm_obs = tf.div(tf.subtract(self.obs_ph,mean_obs),tf.add(std_obs,eps))
+        # norm_act = tf.div(tf.subtract(self.act_ph, mean_action), tf.add(std_action, eps))
+
+        norm_obs = (self.obs_ph-mean_obs)/(std_obs+eps)
+        norm_act = (self.act_ph-mean_action)/(std_action+eps)
 
         # concat the observations and actions to feed to the mlp
         norm_obs_act = tf.concat([norm_obs,norm_act],axis=1,name='norm_obs_act')
         # build the mlp model
-        self.pred_norm_delta_obs = build_mlp(norm_obs_act,obs_dim,scope='dynamics',
-                                         n_layers, size, activation, output_activation)
-
-        # and the output of the model is the diff_state
-        self.pred_delta_obs = tf.add(tf.multiply(self.pred_norm_delta_obs,tf.add(std_deltas,eps)),mean_deltas)
-
-        # denormalize output and add the delta to get the next state
-        self.pred_next_obs = tf.add(self.obs_ph,self.pred_delta_obs)
+        self.pred_norm_delta_obs = build_mlp(norm_obs_act,obs_dim,'dynamics', n_layers, size, activation, output_activation)
 
         # define the target for the prediction
-        delta_obs = tf.subtract(self.next_obs_ph-self.obs_ph)
-        norm_delta_obs = tf.div(tf.subtract(delta_obs, mean_deltas), tf.add(std_deltas, eps))
+        delta_obs = self.next_obs_ph-self.obs_ph
+        # norm_delta_obs = tf.div(tf.subtract(delta_obs, mean_deltas), tf.add(std_deltas, eps))
+        norm_delta_obs = (delta_obs-mean_deltas)/(std_deltas+ eps)
 
         # define the cost function and optimization
         self.loss = tf.losses.mean_squared_error(predictions=self.pred_norm_delta_obs,labels=norm_delta_obs)
         self.update_op = tf.train.AdamOptimizer(learning_rate = learning_rate).minimize(self.loss)
+
+        # and the output of the model is the diff_state
+        # self.pred_delta_obs = tf.add(tf.multiply(self.pred_norm_delta_obs,tf.add(std_deltas,eps)),mean_deltas)
+        self.pred_delta_obs = self.pred_norm_delta_obs*std_deltas+mean_deltas
+
+        # denormalize output and add the delta to get the next state
+        # self.pred_next_obs = tf.add(self.obs_ph,self.pred_delta_obs)
+        self.pred_next_obs = self.obs_ph+self.pred_delta_obs
 
 
     def fit(self, data):
@@ -93,14 +104,14 @@ class NNDynamicsModel():
         denorm_next_obs = data['next_observations']
         dataset_size = denorm_obs.shape[0]
         # get groups of indexes to work on in each mini batch. since its a regression problem, there's no need to randomly sample
-        # but rather sequentially scan the buffer
+        # but rather sequentially scan the buffer (anyway, the data is shuffled externally)
         minibatch_start_indxs = np.arange(0,dataset_size,self.batch_size)
         minibatch_end_indxs = minibatch_start_indxs+self.batch_size
 
         losses=[]
-        for t in self.iterations:
+        for t in range(self.iterations):
             # get batch_size samples from the dataset
-            for i, (start,end) in enumerate(minibatch_start_indxs,minibatch_end_indxs):
+            for i, (start,end) in enumerate(zip(minibatch_start_indxs,minibatch_end_indxs)):
                 # work on the batch
                 _,loss_value=self.sess.run([self.update_op, self.loss],
                                            feed_dict={self.obs_ph:denorm_obs[start:end],
@@ -115,5 +126,5 @@ class NNDynamicsModel():
         pred_next_state = self.sess.run([self.pred_next_obs],
                                         feed_dict={self.obs_ph:states,
                                                    self.act_ph:actions})
-        return pred_next_state
+        return pred_next_state[0]
 
